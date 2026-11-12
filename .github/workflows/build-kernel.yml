@@ -1,0 +1,163 @@
+name: build oss kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      defconfig:
+        description: Select defconfig
+        required: true
+        type: choice
+        default: camellian_defconfig
+        options:
+          - camellian_defconfig
+          - camellian_debug_defconfig
+          - camellian_gl_defconfig
+          - camellian_gl_debug_defconfig
+          - camellian_id_defconfig
+          - camellian_id_debug_defconfig
+          - camellian_in_eea_defconfig
+          - camellian_in_eea_debug_defconfig
+          - camellian_ru_defconfig
+          - camellian_ru_debug_defconfig
+          - camellian_tr_defconfig
+          - camellian_tr_debug_defconfig
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+
+    env:
+      DEFCONFIG: ${{ inputs.defconfig || 'camellian_defconfig' }}
+      ARCH: arm64
+      CLANG_VERSION: clang-r383902
+
+    steps:
+      - name: uploading sources
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential ccache \
+            curl flex git libelf-dev libssl-dev \
+            libncurses-dev lld make \
+            python3 rsync unzip zip \
+            device-tree-compiler \
+            gcc g++ liblz4-tool
+
+      - name: clang
+        uses: actions/checkout@v4
+        with:
+          repository: msft-mirror-aosp/platform.prebuilts.clang.host.linux-x86
+          ref: 4114ce222c83ba93e9c12c91c6ced2541b28f88c
+          path: toolchain-src/clang
+          sparse-checkout: clang-r383902
+          sparse-checkout-cone-mode: true
+
+      - name: android gcc
+        uses: actions/checkout@v4
+        with:
+          repository: LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9
+          ref: lineage-19.1
+          path: toolchain-src/gcc
+          fetch-depth: 1
+
+      - name: setup toolchains
+        run: |
+          mkdir -p prebuilts/clang/host/linux-x86
+          mkdir -p prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9
+
+          cp -a toolchain-src/clang/clang-r383902 \
+            prebuilts/clang/host/linux-x86/
+
+          cp -a toolchain-src/gcc/. \
+            prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/
+
+          CLANG_BIN="$GITHUB_WORKSPACE/prebuilts/clang/host/linux-x86/clang-r383902/bin"
+          GCC_BIN="$GITHUB_WORKSPACE/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/bin"
+
+          chmod +x "$CLANG_BIN/clang"
+
+          test -x "$CLANG_BIN/clang"
+          test -x "$CLANG_BIN/ld.lld"
+          test -x "$GCC_BIN/aarch64-linux-androidkernel-gcc"
+
+          echo "$CLANG_BIN" >> "$GITHUB_PATH"
+          echo "$GCC_BIN" >> "$GITHUB_PATH"
+
+          echo "=== CLANG ==="
+          "$CLANG_BIN/clang" --version
+
+          echo "=== LLD ==="
+          "$CLANG_BIN/ld.lld" --version
+
+          echo "=== GCC ==="
+          "$GCC_BIN/aarch64-linux-androidkernel-gcc" --version
+
+      - name: verify
+        run: |
+          echo "=== KERNEL VERSION ==="
+          grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL|EXTRAVERSION)' Makefile
+
+          echo "=== DEFCONFIG ==="
+          test -f "arch/arm64/configs/$DEFCONFIG"
+          echo "$DEFCONFIG"
+
+          echo "=== TOOLCHAIN CONFIG ==="
+          cat build.config.mtk.aarch64
+
+      - name: Build Kernel
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CLANG_DIR="$GITHUB_WORKSPACE/prebuilts/clang/host/linux-x86/clang-r383902"
+          GCC_BIN="$GITHUB_WORKSPACE/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/bin"
+
+          export PATH="$CLANG_DIR/bin:$GCC_BIN:$PATH"
+          export LD_LIBRARY_PATH="$CLANG_DIR/lib64:${LD_LIBRARY_PATH:-}"
+
+          CROSS_COMPILE="$GCC_BIN/aarch64-linux-androidkernel-"
+
+          BUILD_ARGS=(
+            -j"$(nproc)"
+            O=out
+            ARCH=arm64
+            CC=clang
+            LD=ld.lld
+            NM=llvm-nm
+            OBJCOPY=llvm-objcopy
+            AR=llvm-ar
+            OBJDUMP=llvm-objdump
+            STRIP=llvm-strip
+            CLANG_TRIPLE=aarch64-linux-gnu-
+            CROSS_COMPILE="$CROSS_COMPILE"
+          )
+
+          echo "=== GENERATING CONFIG ==="
+          make "${BUILD_ARGS[@]}" "$DEFCONFIG"
+
+          echo "=== BUILDING KERNEL ==="
+          make "${BUILD_ARGS[@]}" Image.gz-dtb 2>&1 | tee build.log
+
+          echo "=== BUILD OUTPUT ==="
+          find out/arch/arm64/boot -maxdepth 2 -type f
+
+      - name: Upload Kernel Artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Camellian-TOS-Kernel-${{ github.run_number }}
+          path: |
+            out/arch/arm64/boot/Image
+            out/arch/arm64/boot/Image.gz
+          if-no-files-found: error
+          retention-days: 14
