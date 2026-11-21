@@ -2,12 +2,6 @@
 # =============================================================================
 # build-kernel.sh -- Build Camellian Kernel (Linux 4.14.186 ARM64)
 #
-# Local / Ubuntu 22.04 version of .github/workflows/build-kernel.yml
-# Every workflow step is kept, in the same order:
-#   Checkout Kernel -> Install Dependencies -> Checkout AOSP Clang R383902
-#   -> Checkout Android GCC 4.9 -> Setup Toolchains -> Verify Source
-#   -> Build Kernel -> Upload Kernel Artifacts
-#
 # Run from inside the kernel source directory:
 #   bash build-kernel.sh
 #   bash build-kernel.sh camellian_gl_defconfig
@@ -298,62 +292,14 @@ BUILD_ARGS=(
 echo "=== GENERATING CONFIG ==="
 make "${BUILD_ARGS[@]}" "$DEFCONFIG"
 
+make O=out ARCH=arm64 headers_install
+
 echo "=== BUILDING KERNEL ==="
 timeout "${BUILD_TIMEOUT_MIN}m" \
-    make "${BUILD_ARGS[@]}" Image.gz-dtb 2>&1 | tee build.log
+    make "${BUILD_ARGS[@]}" Image.gz-dtb
 
 echo "=== ACTUAL KERNEL RELEASE ==="
 cat out/include/config/kernel.release
 
 echo "=== BUILD OUTPUT ==="
 find out/arch/arm64/boot -maxdepth 2 -type f
-
-# =============================================================================
-# Step: Upload Kernel Artifacts (local)
-# =============================================================================
-step "Upload Kernel Artifacts"
-
-ARTIFACT_ROOT="$WORKSPACE/artifacts"
-mkdir -p "$ARTIFACT_ROOT"
-
-RUN_NUMBER_FILE="$ARTIFACT_ROOT/.run_number"
-RUN_NUMBER=$(( $(cat "$RUN_NUMBER_FILE" 2>/dev/null || echo 0) + 1 ))
-echo "$RUN_NUMBER" > "$RUN_NUMBER_FILE"
-
-ARTIFACT_NAME="Camellian-TOS-Kernel-${RUN_NUMBER}"
-ARTIFACT_DIR="$ARTIFACT_ROOT/$ARTIFACT_NAME"
-mkdir -p "$ARTIFACT_DIR"
-
-ARTIFACT_FILES=(
-    out/arch/arm64/boot/Image
-    out/arch/arm64/boot/Image.gz
-    out/arch/arm64/boot/Image.gz-dtb
-    out/vmlinux
-    out/System.map
-    out/.config
-    build.log
-)
-
-copied=0
-for f in "${ARTIFACT_FILES[@]}"; do
-    if [ -f "$f" ]; then
-        cp --parents -a "$f" "$ARTIFACT_DIR/"
-        copied=$((copied + 1))
-    else
-        warn "Not found, skipped: $f"
-    fi
-done
-
-while IFS= read -r -d '' f; do
-    cp --parents -a "$f" "$ARTIFACT_DIR/"
-    copied=$((copied + 1))
-done < <(find out/arch/arm64/boot -type f -name '*.dtb' -print0)
-
-if [ "$copied" -eq 0 ]; then
-    die "No artifact files were found."
-fi
-
-echo "=== ARTIFACT: $ARTIFACT_NAME ($copied files) ==="
-( cd "$ARTIFACT_DIR" && find . -type f -printf '%10s %p\n' | sort -k2 )
-echo
-info "Done. Artifacts saved in: $ARTIFACT_DIR"
