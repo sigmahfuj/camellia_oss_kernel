@@ -12,7 +12,7 @@
 # =============================================================================
 
 set -Eeuo pipefail
-trap 'rc=$?; echo "[ERROR] line ${LINENO}: "${BASH_COMMAND}" exited with status ${rc}" >&2' ERR
+trap 'rc=$?; echo "[ERROR] line ${LINENO}: ${BASH_COMMAND} exited with status ${rc}" >&2' ERR
 
 step() { printf '\n==================== %s ====================\n' "$*"; }
 info() { printf '[*] %s\n' "$*"; }
@@ -68,6 +68,7 @@ ask_custom_defconfig() {
         ask "Custom defconfig name (file in $CFG_DIR): " ""
         name="$(basename -- "$REPLY")"
         [ -n "$name" ] || die "No defconfig name given."
+
         if [ -f "$CFG_DIR/$name" ]; then
             DEFCONFIG="$name"
             info "Using $CFG_DIR/$DEFCONFIG"
@@ -77,8 +78,10 @@ ask_custom_defconfig() {
             info "Using $CFG_DIR/$DEFCONFIG"
             return 0
         fi
+
         warn "Not found: $CFG_DIR/$name"
     done
+
     die "Custom defconfig not found."
 }
 
@@ -87,6 +90,7 @@ ask_custom_defconfig() {
 # -----------------------------------------------------------------------------
 choose_defconfig() {
     local i choice
+
     {
         echo "Select Camellian defconfig:"
         for i in "${!DEFCONFIG_OPTIONS[@]}"; do
@@ -104,12 +108,14 @@ choose_defconfig() {
     while true; do
         ask "Choice [1]: " 1
         choice="$REPLY"
+
         if [[ "$choice" =~ ^[0-9]+$ ]]; then
             choice=$((10#$choice))
             if [ "$choice" -ge 1 ] && [ "$choice" -le "$CUSTOM_INDEX" ]; then
                 break
             fi
         fi
+
         warn "Invalid choice: $REPLY"
     done
 
@@ -125,13 +131,17 @@ choose_defconfig() {
 # =============================================================================
 step "Checkout Kernel"
 
-[ -f Makefile ] && [ -d "$CFG_DIR" ] && grep -q '^VERSION' Makefile || die "Run from kernel source root."
+[ -f Makefile ] && [ -d "$CFG_DIR" ] && grep -q '^VERSION' Makefile \
+    || die "Run from kernel source root."
+
 info "Kernel source: $KERNEL_DIR"
 
 DEFCONFIG="${1:-${DEFCONFIG:-}}"
+
 if [ -z "$DEFCONFIG" ]; then
     choose_defconfig
 fi
+
 export DEFCONFIG
 info "DEFCONFIG = $DEFCONFIG"
 
@@ -159,6 +169,7 @@ fi
 step "Install Dependencies"
 
 $SUDO apt-get update
+
 $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y \
     bc bison build-essential ccache \
     curl flex git libelf-dev libssl-dev \
@@ -181,6 +192,7 @@ if [ -e "$CLANG_SRC/clang-r383902/bin/ld.lld" ]; then
 else
     rm -rf "$CLANG_SRC"
     mkdir -p "$CLANG_SRC"
+
     git -C "$CLANG_SRC" init -q
     git -C "$CLANG_SRC" remote add origin "$CLANG_REPO"
     git -C "$CLANG_SRC" sparse-checkout init --cone
@@ -213,6 +225,7 @@ fi
 step "Setup Toolchains"
 
 cd "$WORKSPACE"
+
 mkdir -p prebuilts/clang/host/linux-x86
 mkdir -p prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9
 
@@ -230,6 +243,7 @@ CLANG_BIN="$WORKSPACE/prebuilts/clang/host/linux-x86/clang-r383902/bin"
 GCC_BIN="$WORKSPACE/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/bin"
 
 chmod +x "$CLANG_BIN/clang"
+
 test -x "$CLANG_BIN/clang"
 test -x "$CLANG_BIN/ld.lld"
 test -x "$GCC_BIN/aarch64-linux-androidkernel-gcc"
@@ -238,8 +252,10 @@ export PATH="$GCC_BIN:$CLANG_BIN:$PATH"
 
 echo "=== CLANG ==="
 "$CLANG_BIN/clang" --version
+
 echo "=== LLD ==="
 "$CLANG_BIN/ld.lld" --version
+
 echo "=== GCC ==="
 "$GCC_BIN/aarch64-linux-androidkernel-gcc" --version
 
@@ -292,14 +308,49 @@ BUILD_ARGS=(
 echo "=== GENERATING CONFIG ==="
 make "${BUILD_ARGS[@]}" "$DEFCONFIG"
 
+echo "=== INSTALLING KERNEL HEADERS ==="
 make O=out ARCH=arm64 headers_install
 
 echo "=== BUILDING KERNEL ==="
 timeout "${BUILD_TIMEOUT_MIN}m" \
-    make "${BUILD_ARGS[@]}" Image.gz-dtb
+    make "${BUILD_ARGS[@]}" Image Image.gz Image.gz-dtb vmlinux
+
+# =============================================================================
+# Step: Verify Build Outputs
+# =============================================================================
+step "Verify Build Outputs"
 
 echo "=== ACTUAL KERNEL RELEASE ==="
 cat out/include/config/kernel.release
 
-echo "=== BUILD OUTPUT ==="
-find out/arch/arm64/boot -maxdepth 2 -type f
+echo
+echo "=== MAIN KERNEL IMAGES ==="
+for f in \
+    out/arch/arm64/boot/Image \
+    out/arch/arm64/boot/Image.gz \
+    out/arch/arm64/boot/Image.gz-dtb
+do
+    if [ -f "$f" ]; then
+        ls -lh "$f"
+    else
+        warn "Not found: $f"
+    fi
+done
+
+echo
+echo "=== ADDITIONAL KERNEL OUTPUTS ==="
+for f in out/vmlinux out/System.map out/.config; do
+    if [ -f "$f" ]; then
+        ls -lh "$f"
+    else
+        warn "Not found: $f"
+    fi
+done
+
+echo
+echo "=== DTB FILES ==="
+find out/arch/arm64/boot -type f -name '*.dtb' -print
+
+step "Build Complete"
+info "Kernel build finished."
+info "Output directory: $WORKSPACE/out"
