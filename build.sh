@@ -1,6 +1,13 @@
+
 #!/usr/bin/env bash
 # =============================================================================
 # build-kernel.sh -- Build Camellian Kernel (Linux 4.14.186 ARM64)
+#
+# Local / Ubuntu 22.04 version of .github/workflows/build-kernel.yml
+# Every workflow step is kept, in the same order:
+#   Checkout Kernel -> Install Dependencies -> Checkout AOSP Clang R383902
+#   -> Checkout Android GCC 4.9 -> Setup Toolchains -> Verify Source
+#   -> Build Kernel -> Upload Kernel Artifacts
 #
 # Run from inside the kernel source directory:
 #   bash build-kernel.sh
@@ -12,7 +19,7 @@
 # =============================================================================
 
 set -Eeuo pipefail
-trap 'rc=$?; echo "[ERROR] line ${LINENO}: ${BASH_COMMAND} exited with status ${rc}" >&2' ERR
+trap 'rc=$?; echo "[ERROR] line ${LINENO}: "${BASH_COMMAND}" exited with status ${rc}" >&2' ERR
 
 step() { printf '\n==================== %s ====================\n' "$*"; }
 info() { printf '[*] %s\n' "$*"; }
@@ -68,7 +75,6 @@ ask_custom_defconfig() {
         ask "Custom defconfig name (file in $CFG_DIR): " ""
         name="$(basename -- "$REPLY")"
         [ -n "$name" ] || die "No defconfig name given."
-
         if [ -f "$CFG_DIR/$name" ]; then
             DEFCONFIG="$name"
             info "Using $CFG_DIR/$DEFCONFIG"
@@ -78,10 +84,8 @@ ask_custom_defconfig() {
             info "Using $CFG_DIR/$DEFCONFIG"
             return 0
         fi
-
         warn "Not found: $CFG_DIR/$name"
     done
-
     die "Custom defconfig not found."
 }
 
@@ -90,7 +94,6 @@ ask_custom_defconfig() {
 # -----------------------------------------------------------------------------
 choose_defconfig() {
     local i choice
-
     {
         echo "Select Camellian defconfig:"
         for i in "${!DEFCONFIG_OPTIONS[@]}"; do
@@ -108,14 +111,12 @@ choose_defconfig() {
     while true; do
         ask "Choice [1]: " 1
         choice="$REPLY"
-
         if [[ "$choice" =~ ^[0-9]+$ ]]; then
             choice=$((10#$choice))
             if [ "$choice" -ge 1 ] && [ "$choice" -le "$CUSTOM_INDEX" ]; then
                 break
             fi
         fi
-
         warn "Invalid choice: $REPLY"
     done
 
@@ -131,17 +132,13 @@ choose_defconfig() {
 # =============================================================================
 step "Checkout Kernel"
 
-[ -f Makefile ] && [ -d "$CFG_DIR" ] && grep -q '^VERSION' Makefile \
-    || die "Run from kernel source root."
-
+[ -f Makefile ] && [ -d "$CFG_DIR" ] && grep -q '^VERSION' Makefile || die "Run from kernel source root."
 info "Kernel source: $KERNEL_DIR"
 
 DEFCONFIG="${1:-${DEFCONFIG:-}}"
-
 if [ -z "$DEFCONFIG" ]; then
     choose_defconfig
 fi
-
 export DEFCONFIG
 info "DEFCONFIG = $DEFCONFIG"
 
@@ -169,7 +166,6 @@ fi
 step "Install Dependencies"
 
 $SUDO apt-get update
-
 $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y \
     bc bison build-essential ccache \
     curl flex git libelf-dev libssl-dev \
@@ -192,7 +188,6 @@ if [ -e "$CLANG_SRC/clang-r383902/bin/ld.lld" ]; then
 else
     rm -rf "$CLANG_SRC"
     mkdir -p "$CLANG_SRC"
-
     git -C "$CLANG_SRC" init -q
     git -C "$CLANG_SRC" remote add origin "$CLANG_REPO"
     git -C "$CLANG_SRC" sparse-checkout init --cone
@@ -225,7 +220,6 @@ fi
 step "Setup Toolchains"
 
 cd "$WORKSPACE"
-
 mkdir -p prebuilts/clang/host/linux-x86
 mkdir -p prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9
 
@@ -243,7 +237,6 @@ CLANG_BIN="$WORKSPACE/prebuilts/clang/host/linux-x86/clang-r383902/bin"
 GCC_BIN="$WORKSPACE/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/bin"
 
 chmod +x "$CLANG_BIN/clang"
-
 test -x "$CLANG_BIN/clang"
 test -x "$CLANG_BIN/ld.lld"
 test -x "$GCC_BIN/aarch64-linux-androidkernel-gcc"
@@ -252,10 +245,8 @@ export PATH="$GCC_BIN:$CLANG_BIN:$PATH"
 
 echo "=== CLANG ==="
 "$CLANG_BIN/clang" --version
-
 echo "=== LLD ==="
 "$CLANG_BIN/ld.lld" --version
-
 echo "=== GCC ==="
 "$GCC_BIN/aarch64-linux-androidkernel-gcc" --version
 
@@ -308,49 +299,72 @@ BUILD_ARGS=(
 echo "=== GENERATING CONFIG ==="
 make "${BUILD_ARGS[@]}" "$DEFCONFIG"
 
+# -----------------------------------------------------------------------------
+# Install Kernel Headers
+# -----------------------------------------------------------------------------
 echo "=== INSTALLING KERNEL HEADERS ==="
 make O=out ARCH=arm64 headers_install
 
+echo "=== VERIFYING INSTALLED HEADERS ==="
+test -f out/usr/include/linux/unistd.h
+echo "Headers installed successfully: out/usr/include/"
+
 echo "=== BUILDING KERNEL ==="
 timeout "${BUILD_TIMEOUT_MIN}m" \
-    make "${BUILD_ARGS[@]}" Image Image.gz Image.gz-dtb vmlinux
-
-# =============================================================================
-# Step: Verify Build Outputs
-# =============================================================================
-step "Verify Build Outputs"
+    make "${BUILD_ARGS[@]}" Image.gz-dtb 2>&1 | tee build.log
 
 echo "=== ACTUAL KERNEL RELEASE ==="
 cat out/include/config/kernel.release
 
-echo
-echo "=== MAIN KERNEL IMAGES ==="
-for f in \
-    out/arch/arm64/boot/Image \
-    out/arch/arm64/boot/Image.gz \
+echo "=== BUILD OUTPUT ==="
+find out/arch/arm64/boot -maxdepth 2 -type f
+
+# =============================================================================
+# Step: Upload Kernel Artifacts (local)
+# =============================================================================
+step "Upload Kernel Artifacts"
+
+ARTIFACT_ROOT="$WORKSPACE/artifacts"
+mkdir -p "$ARTIFACT_ROOT"
+
+RUN_NUMBER_FILE="$ARTIFACT_ROOT/.run_number"
+RUN_NUMBER=$(( $(cat "$RUN_NUMBER_FILE" 2>/dev/null || echo 0) + 1 ))
+echo "$RUN_NUMBER" > "$RUN_NUMBER_FILE"
+
+ARTIFACT_NAME="camellian-oss-kernel-${RUN_NUMBER}"
+ARTIFACT_DIR="$ARTIFACT_ROOT/$ARTIFACT_NAME"
+mkdir -p "$ARTIFACT_DIR"
+
+ARTIFACT_FILES=(
+    out/arch/arm64/boot/Image
+    out/arch/arm64/boot/Image.gz
     out/arch/arm64/boot/Image.gz-dtb
-do
+    out/vmlinux
+    out/System.map
+    out/.config
+    build.log
+)
+
+copied=0
+for f in "${ARTIFACT_FILES[@]}"; do
     if [ -f "$f" ]; then
-        ls -lh "$f"
+        cp --parents -a "$f" "$ARTIFACT_DIR/"
+        copied=$((copied + 1))
     else
-        warn "Not found: $f"
+        warn "Not found, skipped: $f"
     fi
 done
 
-echo
-echo "=== ADDITIONAL KERNEL OUTPUTS ==="
-for f in out/vmlinux out/System.map out/.config; do
-    if [ -f "$f" ]; then
-        ls -lh "$f"
-    else
-        warn "Not found: $f"
-    fi
-done
+while IFS= read -r -d '' f; do
+    cp --parents -a "$f" "$ARTIFACT_DIR/"
+    copied=$((copied + 1))
+done < <(find out/arch/arm64/boot -type f -name '*.dtb' -print0)
 
-echo
-echo "=== DTB FILES ==="
-find out/arch/arm64/boot -type f -name '*.dtb' -print
+if [ "$copied" -eq 0 ]; then
+    die "No artifact files were found."
+fi
 
-step "Build Complete"
-info "Kernel build finished."
-info "Output directory: $WORKSPACE/out"
+echo "=== ARTIFACT: $ARTIFACT_NAME ($copied files) ==="
+( cd "$ARTIFACT_DIR" && find . -type f -printf '%10s %p\n' | sort -k2 )
+echo
+info "Done. Artifacts saved in: $ARTIFACT_DIR"
